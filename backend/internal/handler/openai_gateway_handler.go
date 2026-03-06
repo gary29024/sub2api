@@ -21,7 +21,8 @@ import (
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
-	"go.uber.org/zap"
+ 	"github.com/tidwall/sjson"
+ 	"go.uber.org/zap"
 )
 
 // OpenAIGatewayHandler handles OpenAI API gateway requests
@@ -64,6 +65,57 @@ func NewOpenAIGatewayHandler(
 		maxAccountSwitches:      maxAccountSwitches,
 		cfg:                     cfg,
 	}
+}
+
+// normalizeResponsesInputCompat normalizes OpenAI Responses `input` into the list form.
+func normalizeResponsesInputCompat(body []byte) ([]byte, bool, error) {
+ if len(body) == 0 || !gjson.ValidBytes(body) {
+  return body, false, nil
+ }
+ input := gjson.GetBytes(body, "input")
+ if !input.Exists() {
+  return body, false, nil
+ }
+ if input.Type == gjson.String {
+  txt := input.String()
+  txtJSON, _ := json.Marshal(txt)
+  wrapped := []byte(fmt.Sprintf(`[{"role":"user","content":[{"type":"input_text","text":%s}]}]`, string(txtJSON)))
+  newBody, err := sjson.SetRawBytes(body, "input", wrapped)
+  if err != nil {
+   return body, false, err
+  }
+  return newBody, true, nil
+ }
+ if input.Type != gjson.JSON {
+  return body, false, nil
+ }
+ raw := strings.TrimSpace(input.Raw)
+ if raw == "" || raw[0] != '[' {
+  return body, false, nil
+ }
+ changed := false
+ items := input.Array()
+ for i := range items {
+  role := items[i].Get("role")
+  if !role.Exists() || role.Type != gjson.String {
+   continue
+  }
+  content := items[i].Get("content")
+  if !content.Exists() || content.Type != gjson.String {
+   continue
+  }
+  txt := content.String()
+  txtJSON, _ := json.Marshal(txt)
+  part := []byte(fmt.Sprintf(`[{"type":"input_text","text":%s}]`, string(txtJSON)))
+  path := fmt.Sprintf("input.%d.content", i)
+  var err error
+  body, err = sjson.SetRawBytes(body, path, part)
+  if err != nil {
+   return body, changed, err
+  }
+  changed = true
+ }
+ return body, changed, nil
 }
 
 // Responses handles OpenAI Responses API endpoint
@@ -134,12 +186,21 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 
 	// 校验请求体 JSON 合法性
-	if !gjson.ValidBytes(body) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
-		return
-	}
+	 if !gjson.ValidBytes(body) {
+  		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+  		return
+ 	}
 
-	// 使用 gjson 只读提取字段做校验，避免完整 Unmarshal
+ 	if newBody, changed, normErr := normalizeResponsesInputCompat(body); normErr != nil {
+  		reqLog.Warn("openai.request_normalize_failed", zap.Error(normErr))
+  		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to normalize request body")
+  		return
+ 	} else if changed {
+  		body = newBody
+ 	}
+
+ 	// 使用 gjson 只读提取字段做校验
+
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || modelResult.String() == "" {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
