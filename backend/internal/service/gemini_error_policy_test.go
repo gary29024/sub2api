@@ -388,6 +388,7 @@ type geminiErrorPolicyRepo struct {
 	setErrorCalls       int
 	setRateLimitedCalls int
 	setTempCalls        int
+	lastRateLimitedAt   time.Time
 }
 
 func (r *geminiErrorPolicyRepo) SetError(_ context.Context, _ int64, _ string) error {
@@ -395,8 +396,9 @@ func (r *geminiErrorPolicyRepo) SetError(_ context.Context, _ int64, _ string) e
 	return nil
 }
 
-func (r *geminiErrorPolicyRepo) SetRateLimited(_ context.Context, _ int64, _ time.Time) error {
+func (r *geminiErrorPolicyRepo) SetRateLimited(_ context.Context, _ int64, at time.Time) error {
 	r.setRateLimitedCalls++
+	r.lastRateLimitedAt = at
 	return nil
 }
 
