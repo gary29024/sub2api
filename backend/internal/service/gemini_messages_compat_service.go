@@ -2745,6 +2745,14 @@ func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Cont
 			}
 			ra = time.Now().Add(cooldown)
 			logger.LegacyPrintf("service.gemini_messages_compat", "[Gemini 429] Account %d (Code Assist, tier=%s, project=%s) rate limited, cooldown=%v", account.ID, tierID, projectID, time.Until(ra).Truncate(time.Second))
+		} else if oauthType == "google_one" {
+			// Gemini CLI / Google One: use tier cooldown instead of forcing PST midnight
+			cooldown := geminiCooldownForTier(tierID)
+			if s.rateLimitService != nil {
+				cooldown = s.rateLimitService.GeminiCooldown(ctx, account)
+			}
+			ra = time.Now().Add(cooldown)
+			logger.LegacyPrintf("service.gemini_messages_compat", "[Gemini 429] Account %d (Google One, tier=%s) rate limited, cooldown=%v", account.ID, tierID, time.Until(ra).Truncate(time.Second))
 		} else {
 			// API Key / AI Studio OAuth: PST 午夜
 			if ts := nextGeminiDailyResetUnix(); ts != nil {
