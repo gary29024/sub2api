@@ -2449,6 +2449,33 @@
             </div>
           </div>
         </div>
+        <div v-if="form.platform === 'antigravity'" class="mt-3 flex items-center gap-2">
+          <label class="flex cursor-pointer items-center gap-2">
+            <input
+              type="checkbox"
+              v-model="allowOverages"
+              class="h-4 w-4 rounded border-gray-300 text-primary-500 focus:ring-primary-500 dark:border-dark-500"
+            />
+            <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
+              {{ t('admin.accounts.allowOverages') }}
+            </span>
+          </label>
+          <div class="group relative">
+            <span
+              class="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full bg-gray-200 text-xs text-gray-500 hover:bg-gray-300 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500"
+            >
+              ?
+            </span>
+            <div
+              class="pointer-events-none absolute left-0 top-full z-[100] mt-1.5 w-72 rounded bg-gray-900 px-3 py-2 text-xs text-white opacity-0 transition-opacity group-hover:opacity-100 dark:bg-gray-700"
+            >
+              {{ t('admin.accounts.allowOveragesTooltip') }}
+              <div
+                class="absolute bottom-full left-3 border-4 border-transparent border-b-gray-900 dark:border-b-gray-700"
+              ></div>
+            </div>
+          </div>
+        </div>
 
         <!-- Group Selection - 仅标准模式显示 -->
         <GroupSelector
@@ -2477,6 +2504,7 @@
         :allow-multiple="form.platform === 'anthropic'"
         :show-cookie-option="form.platform === 'anthropic'"
         :show-refresh-token-option="form.platform === 'openai' || form.platform === 'sora' || form.platform === 'antigravity'"
+        :show-mobile-refresh-token-option="form.platform === 'openai'"
         :show-session-token-option="form.platform === 'sora'"
         :show-access-token-option="form.platform === 'sora'"
         :platform="form.platform"
@@ -2484,6 +2512,7 @@
         @generate-url="handleGenerateUrl"
         @cookie-auth="handleCookieAuth"
         @validate-refresh-token="handleValidateRefreshToken"
+        @validate-mobile-refresh-token="handleOpenAIValidateMobileRT"
         @validate-session-token="handleValidateSessionToken"
         @import-access-token="handleImportAccessToken"
       />
@@ -2991,6 +3020,7 @@ const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OF
 const codexCLIOnlyEnabled = ref(false)
 const anthropicPassthroughEnabled = ref(false)
 const mixedScheduling = ref(false) // For antigravity accounts: enable mixed scheduling
+const allowOverages = ref(false) // For antigravity accounts: enable AI Credits overages
 const antigravityAccountType = ref<'oauth' | 'upstream'>('oauth') // For antigravity: oauth or upstream
 const soraAccountType = ref<'oauth' | 'apikey'>('oauth') // For sora: oauth or apikey (upstream)
 const upstreamBaseUrl = ref('') // For upstream type: base URL
@@ -3016,6 +3046,13 @@ const getAntigravityModelMappingKey = createStableObjectKeyResolver<ModelMapping
 const getTempUnschedRuleKey = createStableObjectKeyResolver<TempUnschedRuleForm>('create-temp-unsched-rule')
 const geminiOAuthType = ref<'code_assist' | 'google_one' | 'ai_studio'>('google_one')
 const geminiAIStudioOAuthEnabled = ref(false)
+
+function buildAntigravityExtra(): Record<string, unknown> | undefined {
+  const extra: Record<string, unknown> = {}
+  if (mixedScheduling.value) extra.mixed_scheduling = true
+  if (allowOverages.value) extra.allow_overages = true
+  return Object.keys(extra).length > 0 ? extra : undefined
+}
 
 const showMixedChannelWarning = ref(false)
 const mixedChannelWarningDetails = ref<{ groupName: string; currentPlatform: string; otherPlatform: string } | null>(
@@ -3282,6 +3319,7 @@ watch(
       accountCategory.value = 'oauth-based'
       antigravityAccountType.value = 'oauth'
     } else {
+      allowOverages.value = false
       antigravityWhitelistModels.value = []
       antigravityModelMappings.value = []
       antigravityModelRestrictionMode.value = 'mapping'
@@ -3712,6 +3750,7 @@ const resetForm = () => {
   sessionIdMaskingEnabled.value = false
   cacheTTLOverrideEnabled.value = false
   cacheTTLOverrideTarget.value = '5m'
+  allowOverages.value = false
   antigravityAccountType.value = 'oauth'
   upstreamBaseUrl.value = ''
   upstreamApiKey.value = ''
@@ -3960,7 +3999,7 @@ const handleSubmit = async () => {
 
     applyInterceptWarmup(credentials, interceptWarmupRequests.value, 'create')
 
-    const extra = mixedScheduling.value ? { mixed_scheduling: true } : undefined
+    const extra = buildAntigravityExtra()
     await createAccountAndFinish(form.platform, 'apikey', credentials, extra)
     return
   }
@@ -4323,11 +4362,14 @@ const handleOpenAIExchange = async (authCode: string) => {
 }
 
 // OpenAI 手动 RT 批量验证和创建
-const handleOpenAIValidateRT = async (refreshTokenInput: string) => {
+// OpenAI Mobile RT 使用的 client_id（与后端 openai.SoraClientID 一致）
+const OPENAI_MOBILE_RT_CLIENT_ID = 'app_LlGpXReQgckcGGUo2JrYvtJK'
+
+// OpenAI/Sora RT 批量验证和创建（共享逻辑）
+const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string) => {
   const oauthClient = activeOpenAIOAuth.value
   if (!refreshTokenInput.trim()) return
 
-  // Parse multiple refresh tokens (one per line)
   const refreshTokens = refreshTokenInput
     .split('\n')
     .map((rt) => rt.trim())
@@ -4352,7 +4394,8 @@ const handleOpenAIValidateRT = async (refreshTokenInput: string) => {
       try {
         const tokenInfo = await oauthClient.validateRefreshToken(
           refreshTokens[i],
-          form.proxy_id
+          form.proxy_id,
+          clientId
         )
         if (!tokenInfo) {
           failedCount++
@@ -4362,6 +4405,9 @@ const handleOpenAIValidateRT = async (refreshTokenInput: string) => {
         }
 
         const credentials = oauthClient.buildCredentials(tokenInfo)
+        if (clientId) {
+          credentials.client_id = clientId
+        }
         const oauthExtra = oauthClient.buildExtraInfo(tokenInfo) as Record<string, unknown> | undefined
         const extra = buildOpenAIExtra(oauthExtra)
 
@@ -4373,8 +4419,9 @@ const handleOpenAIValidateRT = async (refreshTokenInput: string) => {
           }
         }
 
-        // Generate account name with index for batch
-        const accountName = refreshTokens.length > 1 ? `${form.name} #${i + 1}` : form.name
+        // Generate account name; fallback to email if name is empty (ent schema requires NotEmpty)
+        const baseName = form.name || tokenInfo.email || 'OpenAI OAuth Account'
+        const accountName = refreshTokens.length > 1 ? `${baseName} #${i + 1}` : baseName
 
         let openaiAccountId: string | number | undefined
 
@@ -4456,6 +4503,12 @@ const handleOpenAIValidateRT = async (refreshTokenInput: string) => {
     oauthClient.loading.value = false
   }
 }
+
+// 手动输入 RT（Codex CLI client_id，默认）
+const handleOpenAIValidateRT = (rt: string) => handleOpenAIBatchRT(rt)
+
+// 手动输入 Mobile RT（SoraClientID）
+const handleOpenAIValidateMobileRT = (rt: string) => handleOpenAIBatchRT(rt, OPENAI_MOBILE_RT_CLIENT_ID)
 
 // Sora 手动 ST 批量验证和创建
 const handleSoraValidateST = async (sessionTokenInput: string) => {
@@ -4706,7 +4759,7 @@ const handleAntigravityExchange = async (authCode: string) => {
 		if (antigravityModelMapping) {
 			credentials.model_mapping = antigravityModelMapping
 		}
-		const extra = mixedScheduling.value ? { mixed_scheduling: true } : undefined
+		const extra = buildAntigravityExtra()
 		await createAccountAndFinish('antigravity', 'oauth', credentials, extra)
   } catch (error: any) {
     antigravityOAuth.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')

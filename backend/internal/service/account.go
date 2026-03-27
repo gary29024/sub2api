@@ -901,6 +901,22 @@ func (a *Account) IsMixedSchedulingEnabled() bool {
 	return false
 }
 
+// IsOveragesEnabled 检查 Antigravity 账号是否启用 AI Credits 超量请求。
+func (a *Account) IsOveragesEnabled() bool {
+	if a.Platform != PlatformAntigravity {
+		return false
+	}
+	if a.Extra == nil {
+		return false
+	}
+	if v, ok := a.Extra["allow_overages"]; ok {
+		if enabled, ok := v.(bool); ok {
+			return enabled
+		}
+	}
+	return false
+}
+
 // IsOpenAIPassthroughEnabled 返回 OpenAI 账号是否启用“自动透传（仅替换认证）”。
 //
 // 新字段：accounts.extra.openai_passthrough。
@@ -1525,6 +1541,24 @@ func isPeriodExpired(periodStart time.Time, dur time.Duration) bool {
 		return true // 从未使用过，视为过期（下次 increment 会初始化）
 	}
 	return time.Since(periodStart) >= dur
+}
+
+// IsDailyQuotaPeriodExpired 检查日配额周期是否已过期（用于显示层判断是否需要将 used 归零）
+func (a *Account) IsDailyQuotaPeriodExpired() bool {
+	start := a.getExtraTime("quota_daily_start")
+	if a.GetQuotaDailyResetMode() == "fixed" {
+		return a.isFixedDailyPeriodExpired(start)
+	}
+	return isPeriodExpired(start, 24*time.Hour)
+}
+
+// IsWeeklyQuotaPeriodExpired 检查周配额周期是否已过期（用于显示层判断是否需要将 used 归零）
+func (a *Account) IsWeeklyQuotaPeriodExpired() bool {
+	start := a.getExtraTime("quota_weekly_start")
+	if a.GetQuotaWeeklyResetMode() == "fixed" {
+		return a.isFixedWeeklyPeriodExpired(start)
+	}
+	return isPeriodExpired(start, 7*24*time.Hour)
 }
 
 // IsQuotaExceeded 检查 API Key 账号配额是否已超限（任一维度超限即返回 true）
